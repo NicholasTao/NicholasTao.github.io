@@ -1,0 +1,431 @@
+---FOLDER ./example
+---FOLDER ./example/example_implement
+---FILE ./example/example_implement/const.py
+from enum import Enum, unique
+
+
+@unique
+class Status(Enum):
+    Undo = 0
+    Doing = 1
+    Done = 2
+    Fail = 3
+
+---FILE ./example/example_implement/dao.py
+import sqlalchemy
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, Integer
+
+from example.example_implement.const import Status
+
+Base = declarative_base()
+
+
+class TaskStatus(Base):
+    __tablename__ = "task_status"
+    tid = Column(Integer(), primary_key=True)
+    status = Column(Integer())
+
+    def __init__(self, tid, status):
+        self.tid = tid
+        self.status = status
+
+    def __repr__(self):
+        return "TS(%s:%s)" % (self.tid, self.status)
+
+
+class DataBaseBiz(object):
+    """to object"""
+    _engine = None
+    _session = None
+
+    _singleton = None
+    _DB_PATH = "ei_db"
+
+    def __init__(self):
+        if self.__class__._engine is None:
+            self.__class__._engine = sqlalchemy.create_engine(
+                'sqlite:///%s' % self._DB_PATH)
+        if self.__class__._session is None:
+            self.__class__._session = sessionmaker(bind=self._engine)()
+        self._engine = self.__class__._engine
+        self._session = self.__class__._session
+
+    def __new__(cls):
+        if not isinstance(cls._singleton, cls):
+            cls._singleton = object.__new__(cls)
+        return cls._singleton
+
+    def create_all(self):
+        Base.metadata.create_all(self._engine, checkfirst=True)
+
+    def _clear_all(self):
+        self._session.query(TaskStatus).delete()
+        self._session.commit()
+
+    def add(self, objs):
+        for obj in objs:
+            self._session.add(obj)
+        self._session.commit()
+
+    @property
+    def session(self):
+        return self._session
+
+
+class TaskStatusOpt(object):
+    # def __init__(self):
+    def get_task2status(self, tids):
+        # update task.status until all success or one fail
+        # todo performance test
+        print(DataBaseBiz().session.query(TaskStatus).filter(
+            TaskStatus.tid.in_(tids)).all())
+
+    def set_tid2status_val(self, tid2status):
+        db = DataBaseBiz()
+        all_rows = db.session.query(TaskStatus).filter(
+            TaskStatus.tid.in_(tid2status)
+        )
+        for row in all_rows:
+            row.status = tid2status[row.tid]
+        # db.session.commit()
+
+    def init_tids(self, tids):
+        # add tid: Undo
+        db = DataBaseBiz()
+        db.add([TaskStatus(tid, Status.Undo.value) for tid in tids])
+
+
+if __name__ == '__main__':
+    db = DataBaseBiz()
+    db.create_all()
+    # db.add([TaskStatus(tid=333, status=2)])
+    TaskStatusOpt().get_task2status([333])
+---FILE ./example/example_implement/encode.py
+import json
+
+
+
+def load_raw_json():
+    with open("../../output/mission.json", "r") as f:
+        data = json.load(f)
+        print(data)
+    return data
+
+
+class Encode(object):
+    @classmethod
+    def tid2host_target_action(cls, tid):
+        host = str(tid // 100000)
+        target = str(tid % 100000 // 100)
+        action = str(tid % 100)
+        return host, target, action
+
+    @classmethod
+    def host_target_action2tid(cls, host, target, action):
+        return int(host) * 100000 + int(target) * 100 + int(action)
+
+    @classmethod
+    def json2mission(cls, raw_json):
+        return [
+            [
+                [
+                    [
+                        cls.tid2task(tid)
+                        for tid in bt
+                    ]
+                    for bt in j
+                ]
+                for j in bj
+            ]
+            for bj in raw_json
+        ]
+
+
+if __name__ == '__main__':
+    raw_json = load_raw_json()
+    print(Encode.tid2task(100122221))
+    m = Encode.json2mission(raw_json)
+    print(m)
+    for bj in m:
+        print(bj)
+---FILE ./example/example_implement/monitor.py
+from abc import ABC, abstractmethod
+from typing import List
+
+
+class Monitor(ABC):
+    @abstractmethod
+    def monitor(self, tasks):
+        while True:---FILE ./example/example_implement/sender.py
+import time
+import threading
+
+from example.example_implement.const import Status
+from example.example_implement.dao import TaskStatusOpt
+from src.implement.impl import AbstractSender
+from src.model import Job
+
+
+class MockReceiver(object):
+    def receive(self, job):
+        self.run(job)
+        # threading.Thread(target=self.run, args=[job]).start()
+
+    def run(self, job):
+        # time.sleep(2)
+        tid2status_val = {
+            task.tid: Status.Done.value
+            for task in job.all_tasks
+        }
+        TaskStatusOpt().set_tid2status_val(tid2status_val)
+        print("%s run:%s\n" % (job.host, job), end="")
+
+
+class Sender(AbstractSender):
+    def send(self, job: Job):
+        print("send[%s] to %s" % (job, job.host))
+        MockReceiver().receive(job)
+        return
+---FILE ./example/example_implement/__init__.py
+---FOLDER ./example/test
+---FILE ./example/test/test_batch_job_exe.py
+from example.example_implement.sender import Sender
+from example.test.util import BatchJobFactory
+from src.core.batch_job_exe import BatchJobExe
+from src.implement.impl import Implement
+
+test_batch_job = BatchJobFactory.list2bj([
+    "h1_nova-api_stop", "h2_nova-api_stop"
+])
+
+if __name__ == '__main__':
+    Implement.sender = Sender()
+    BatchJobExe().main(test_batch_job)
+---FILE ./example/test/test_mission_exe.py
+from example.example_implement.dao import DataBaseBiz, TaskStatusOpt
+from example.example_implement.encode import load_raw_json, Encode
+from example.example_implement.sender import Sender
+from example.test.util import BatchJobFactory
+from src.core.batch_job_exe import BatchJobExe
+from src.core.mission_exe import MissionExe
+from src.implement.impl import Implement
+from src.model import Mission
+
+if __name__ == '__main__':
+    Implement.sender = Sender()
+    DataBaseBiz().create_all()
+
+    raw_json = load_raw_json()
+    mission = Mission.json2mission(raw_json)
+
+    TaskStatusOpt.init_tids()
+
+    MissionExe().main(mission)
+---FILE ./example/test/util.py
+from src.model import Job
+
+
+class JobFactory(object):
+    @classmethod
+    def str2job(cls, s):
+        args = s.split("_")
+        job = Job()
+        job.host, job.target, job.action = args[0], args[1], args[2]
+        return job
+
+class BatchJobFactory(object):
+    @classmethod
+    def list2bj(cls, l):
+        return [JobFactory.str2job(s) for s in l]
+
+if __name__ == '__main__':
+    print(JobFactory.str2job("h1_nova-api_stop"))
+    print(BatchJobFactory.list2bj(["h1_nova-api_stop", "h1_nova-api_start"]))
+---FILE ./example/test/__init__.py
+---FILE ./example/__init__.py
+---FILE ./git_zip.py
+import os
+import os.path
+
+GIT_ZIP = "gitzip.txt"
+GIT_FILE = open(GIT_ZIP, "w")
+
+
+def dfs_showdir(path):
+    for item in os.listdir(path):
+        if item == "__pycache__":
+            continue
+        newitem = path + '/' + item
+        print(newitem)
+        if "venv" in newitem or "idea" in newitem:
+            continue
+        if os.path.isdir(newitem):
+            GIT_FILE.write("---FOLDER %s\n" % newitem)
+            dfs_showdir(newitem)
+        elif newitem.endswith("py") or newitem.endswith("json"):
+            GIT_FILE.write("---FILE %s\n" % newitem)
+            with open(newitem, "r") as nf:
+                GIT_FILE.write(nf.read())
+
+
+if __name__ == '__main__':
+    dfs_showdir('.')
+---FOLDER ./output
+---FILE ./output/mission.json
+[
+	[[[100122221], [100133321]], [[100222221]]],
+	[[[100122231, 100133331]], [[100222231]]],
+    [[[100122241]], [[100222241]]],
+	[[[100133341]]],
+	[[[100122242], [100133342]], [[100222242]]],
+	[[[100133343]]],
+	[[[100122243]], [[100222243]]]
+]---FILE ./play.py
+class M:
+    def __iter__(self):
+        self.a = 1
+        return self
+
+    def __next__(self):
+        x = self.a
+        self.a += 1
+        return x
+
+m = M()
+it = iter(m)
+print(next(it))
+print(next(it))
+print(next(it))
+print(next(it))
+print(next(it))
+---FOLDER ./src
+---FOLDER ./src/core
+---FILE ./src/core/batch_job_exe.py
+from src.implement.impl import Implement
+from src.model import BatchJob
+
+
+class BatchJobExe(object):
+    def main(self, batch_job: BatchJob):
+        for job in batch_job:
+            Implement.sender.send(job)
+---FILE ./src/core/mission_exe.py
+from src.core.batch_job_exe import BatchJobExe
+
+
+class MissionExe(object):
+    def main(self, mission):
+        for batch_job in mission:
+            BatchJobExe().main(batch_job)
+---FILE ./src/core/__init__.py
+---FOLDER ./src/implement
+---FILE ./src/implement/impl.py
+from typing import List
+
+from src.model import Job
+from abc import ABC, abstractmethod
+
+
+class Implement(object):
+    # AbstractSender
+    sender = None
+
+
+class AbstractSender(ABC):
+    @abstractmethod
+    def send(self, job: Job):
+        pass
+
+
+class Monitor(ABC):
+    @abstractmethod
+    def monitor(self, tasks: List[float]):
+        pass
+---FILE ./src/implement/__init__.py
+---FILE ./src/model.py
+from example.example_implement.encode import Encode
+
+
+class Task(object):
+    host = ""
+    target = ""
+    action = ""
+
+    def __init__(self, host, target, action):
+        self.host = host
+        self.target = target
+        self.action = action
+
+    @property
+    def tid(self):
+        return Encode.host_target_action2tid(
+            self.host, self.target, self.action)
+
+    def __repr__(self):
+        return "T(%s_%s_%s)" % (self.host, self.target, self.action)
+
+
+class Job(object):
+    host = ""
+    target = ""
+    action = ""
+
+    def __init__(self, task2):
+        self.task2 = task2
+
+    @property
+    def host(self):
+        return self.task2[0][0].host
+
+    @property
+    def all_tasks(self):
+        return [
+            task
+            for t1 in self.task2
+            for task in t1
+        ]
+
+    def __repr__(self):
+        return "J(%s)" % (self.task2)
+
+    def tasks(self):
+        return [self.__repr__()]
+
+
+class BatchJob(object):
+    def __init__(self, task3):
+        self.task3 = task3
+
+    def __iter__(self):
+        return iter(Job(t2) for t2 in self.task3)
+
+    def __repr__(self):
+        return "BJ" + str(self.task3)
+
+
+class Mission(object):
+    def __init__(self, task4):
+        self.task4 = task4
+
+    def tids(self):
+    @classmethod
+    def json2mission(cls, raw_json):
+        return cls([
+            [
+                [
+                    [
+                        Task(*Encode.tid2host_target_action(tid))
+                        for tid in bt
+                    ]
+                    for bt in j
+                ]
+                for j in bj
+            ]
+            for bj in raw_json
+        ])
+
+    def __iter__(self):
+        return iter(BatchJob(t3) for t3 in self.task4)
+---FILE ./src/__init__.py
