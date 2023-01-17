@@ -1,0 +1,659 @@
+---FOLDER ../src/base
+---FOLDER ../src/base/util
+---FILE ../src/base/util/base_handle.py
+import importlib
+import inspect
+import pkgutil
+import traceback
+
+from gevent.pywsgi import WSGIServer
+from webob import Request, Response
+
+from base.util.upg_log import log
+
+
+class BaseHandle(object):
+    URL = ""
+
+    @classmethod
+    def handle(cls, request):
+        if request.method == "GET":
+            return cls.get(request)
+        elif request.method == "POST":
+            return cls.post(request)
+
+    @classmethod
+    def post(cls, request):
+        raise NotImplementedError("no POST handle")
+
+    @classmethod
+    def get(cls, request):
+        raise NotImplementedError("no GET handle")
+
+
+def import_submodules(module):
+    for loader, module_name, is_pkg in pkgutil.walk_packages(
+            module.__path__, module.__name__ + '.'):
+        importlib.import_module(module_name)
+
+
+def get_url2handle_in_module(module):
+    url2handle = {}
+    for loader, module_name, is_pkg in pkgutil.walk_packages(
+            module.__path__, module.__name__ + '.'):
+        for name_class in \
+                inspect.getmembers(importlib.import_module(module_name)):
+            cls = name_class[1]
+            if inspect.isclass(cls) and issubclass(cls, BaseHandle) \
+                    and cls is not BaseHandle:
+                url2handle[cls.URL] = cls
+    return url2handle
+
+
+class UpgCliApp(object):
+    def __init__(self, ip, port, handle_module):
+        self.ip = ip
+        self.port = port
+        self._url2handle = get_url2handle_in_module(handle_module)
+
+    def start(self):
+        WSGIServer((self.ip, self.port), self.application).serve_forever()
+
+    def application(self, env, start_response):
+        try:
+            req = Request(env)
+            log.debug(req.method, req.url, req.body)
+
+            handle_class = self._url2handle[req.path]
+            res_json = handle_class.handle(req)
+        except Exception as err:
+            log.error(err, traceback.format_stack())
+            raise
+            res = Response(status=505, json_body={"err": str(err)})
+        else:
+            log.debug("res_json", res_json)
+            res = Response(status=200, json_body=res_json)
+        return res(env, start_response)
+---FILE ../src/base/util/file_opt.py
+import json
+
+
+def load_json_file(path):
+    with open(path, "r") as f:
+        data = json.load(f)
+    return data
+
+
+def save_json_file(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=1)
+---FILE ../src/base/util/upg_log.py
+class TestLog(object):
+    @classmethod
+    def debug(cls, *arg):
+        print("DEBUG: %s" % " _ ".join(map(str, arg)))
+
+    @classmethod
+    def info(cls, *arg):
+        print("INFO: %s" % " _ ".join(map(str, arg)))
+
+    @classmethod
+    def warning(cls, *arg):
+        print("WARN: %s" % " _ ".join(map(str, arg)))
+
+    @classmethod
+    def error(cls, *arg):
+        print("ERROR: %s" % " _ ".join(map(str, arg)))
+
+
+log = TestLog
+---FILE ../src/base/util/__init__.py
+---FILE ../src/base/__init__.py
+---FOLDER ../src/client
+---FOLDER ../src/client/biz
+---FOLDER ../src/client/biz/collect
+---FILE ../src/client/biz/collect/collect.py
+from base.util.upg_log import log
+from client.dao.db.db_biz import Package, Service, Template, DataBaseBiz
+from client.model.cps_deployed_json import CpsDeployJson
+
+
+class CollectMain(object):
+    @staticmethod
+    def collect_deployed():
+        str2pkg, str2svc = {}, {}
+        for str_ver, str_pkg, str_svc, str_tpl \
+                in CpsDeployJson().get_local_ver_pkg_svc_tpl():
+            if str_pkg not in str2pkg:
+                pkg = Package(name=str_pkg, low=str_ver)
+                str2pkg[str_pkg] = pkg
+            else:
+                pkg = str2pkg[str_pkg]
+
+            if str_svc not in str2svc:
+                svc = Service(name=str_svc)
+                str2svc[str_svc] = svc
+            else:
+                svc = str2svc[str_svc]
+            tpl = Template(name=str_tpl)
+            pkg.services.append(svc)
+            svc.templates.append(tpl)
+        DataBaseBiz().add(str2pkg.values())
+        log.debug("cli_db collect_deployed")
+---FILE ../src/client/biz/collect/__init__.py
+---FILE ../src/client/biz/__init__.py
+---FOLDER ../src/client/cn_app
+---FILE ../src/client/cn_app/cn_application.py
+from base.util.base_handle import UpgCliApp
+
+from client.cn_app import cn_handle
+
+
+class CnApp(UpgCliApp):
+    def __init__(self, ip="127.0.0.1", port="9201"):
+        super().__init__(ip, port, cn_handle)
+---FOLDER ../src/client/cn_app/cn_handle
+---FILE ../src/client/cn_app/cn_handle/collect_handle.py
+from base.util.base_handle import BaseHandle
+from client.biz.collect.collect import CollectMain
+
+
+class CollectHandle(BaseHandle):
+    URL = "/collect"
+
+    @classmethod
+    def post(cls, request):
+        CollectMain.collect_deployed()
+---FILE ../src/client/cn_app/cn_handle/ping_handle.py
+from base.util.base_handle import BaseHandle
+
+
+class PingHandle(BaseHandle):
+    URL = "/"
+
+    @classmethod
+    def get(cls, request):
+        if not request.body:
+            return {"client cn_app": "ping success"}
+        return {"cn_app echo": request.body}
+
+---FILE ../src/client/cn_app/cn_handle/__init__.py
+---FILE ../src/client/cn_app/__init__.py
+# client north app
+# receive north server command
+---FOLDER ../src/client/const
+---FILE ../src/client/const/path.py
+import os
+from os.path import abspath, join
+
+
+class ROOT(object):
+    UPG_CLIENT_DATA = abspath(join(__file__, "../../../../env/cli"))
+
+
+LOW_RPMS = join(ROOT.UPG_CLIENT_DATA, "low_rpms/")
+LOW_UPG_DESC = join(ROOT.UPG_CLIENT_DATA, "low_upg_desc/")
+LOW_UPG_DESC_FILE = join(LOW_UPG_DESC, "{service}_upg.desc")
+HIGH_RPMS = join(ROOT.UPG_CLIENT_DATA, "high_rpms/")
+HIGH_UPG_DESC = join(ROOT.UPG_CLIENT_DATA, "high_upg_desc/")
+HIGH_UPG_DESC_FILE = join(HIGH_UPG_DESC, "{service}_upg.desc")
+SWIFT_FILE_LIST = join(ROOT.UPG_CLIENT_DATA, "swift_file.list")
+if os.name == "nt":
+    CPS_DEPLOYED_JSON = join(ROOT.UPG_CLIENT_DATA, "cps_deployed.json")
+else:
+    CPS_DEPLOYED_JSON = "/opt/fusionplatform/data/cps_config/cps_deployed.json"
+DB_PATH = join(ROOT.UPG_CLIENT_DATA, "upg_cli.db")
+
+
+def client_dir():
+    os.mkdir(HIGH_UPG_DESC)
+    os.mkdir(HIGH_RPMS)
+---FILE ../src/client/const/__init__.py
+# coding=utf-8
+#记录各类常量---FOLDER ../src/client/dao
+---FOLDER ../src/client/dao/db
+---FILE ../src/client/dao/db/db_biz.py
+from functools import lru_cache
+
+import sqlalchemy
+from sqlalchemy.orm import sessionmaker
+
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
+
+from sqlalchemy import Column, String, ForeignKey
+
+from base.util.upg_log import log
+from client.const.path import DB_PATH
+
+Base = declarative_base()
+
+
+class Package(Base):
+    __tablename__ = "package"
+    name = Column(String(32), primary_key=True)
+    high = Column(String(64))
+    low = Column(String(64))
+
+    services = relationship("Service", back_populates="package")
+
+    def __repr__(self):
+        return "Package(%s)" % self.name
+
+
+class Service(Base):
+    __tablename__ = "service"
+    name = Column(String(32), primary_key=True)
+    pkg = Column(String(32), ForeignKey('package.name'))
+
+    package = relationship("Package", back_populates="services")
+    templates = relationship("Template", back_populates="service")
+
+    def __repr__(self):
+        return "Service(%s)" % self.name
+
+
+class Template(Base):
+    __tablename__ = "template"
+    name = Column(String(32), primary_key=True)
+
+    svc = Column(String(32), ForeignKey('service.name'))
+    service = relationship("Service", back_populates="templates")
+
+    def __repr__(self):
+        return "Template(%s)" % self.name
+
+
+@lru_cache(maxsize=None)
+class DataBaseBiz(object):
+    """to object"""
+    _engine = None
+    _session = None
+
+    _singleton = None
+    _DB_PATH = DB_PATH
+
+    def __init__(self):
+        self._engine = sqlalchemy.create_engine('sqlite:///%s' % self._DB_PATH)
+        self._session = sessionmaker(bind=self._engine)()
+
+    def create_all(self):
+        Base.metadata.create_all(self._engine, checkfirst=True)
+        log.debug("cli_db create_all table: %s" % (Base.__subclasses__()))
+
+    def _clear_all(self):
+        for table in (Package, Service, Template):
+            self._session.query(table).delete()
+        self._session.commit()
+        log.debug("cli_db _clear_all table: %s" % (Base.__subclasses__()))
+
+    def add(self, objs):
+        for obj in objs:
+            self._session.add(obj)
+        self._session.commit()
+
+    @property
+    def session(self):
+        return self._session
+---FILE ../src/client/dao/db/__init__.py
+# coding=utf-8
+# 本地数据库
+---FILE ../src/client/dao/__init__.py
+---FOLDER ../src/client/model
+---FILE ../src/client/model/cps_deployed_json.py
+from base.util.file_opt import load_json_file
+
+from client.const.path import CPS_DEPLOYED_JSON
+
+
+class CpsDeployJson(object):
+    _PATH = CPS_DEPLOYED_JSON
+
+    def __init__(self):
+        self._raw = load_json_file(self._PATH)
+
+    def get_local_ver_pkg_svc_tpl(self):
+        for svc, svc_info in self._raw["service"].items():
+            for k, v in svc_info.items():
+                if k != "component":
+                    pkg = v["service package"]
+                    break
+            else:
+                raise KeyError("no service package")
+            for tpl, tpl_info in svc_info["component"].items():
+                ver = tpl_info["version"]
+                yield ver, pkg, svc, tpl
+
+
+if __name__ == '__main__':
+    for ver, pkg, svc, tpl in CpsDeployJson().get_local_ver_pkg_svc_tpl():
+        print(ver, pkg, svc, tpl)---FILE ../src/client/model/__init__.py
+# coding=utf-8
+#存放各类数据模型与结构，包含各类需要调用的class以及自身结构等。---FILE ../src/client/upg_client.py
+import gevent
+from gevent import monkey
+
+
+monkey.patch_all()
+
+from os.path import abspath, join
+import sys
+
+sys.path.append(abspath(join(__file__, "../../../env")))
+sys.path.append(abspath(join(__file__, "../../../src")))
+from client.cn_app.cn_application import CnApp
+from client.dao.db.db_biz import DataBaseBiz
+
+
+class UpgClient(object):
+    def __init__(self, ip, north_port):
+        self.ip = ip
+        self.north_port = north_port
+
+        self.cn_app = CnApp(self.ip, self.north_port)
+
+    def run(self):
+        gevent.joinall([
+            gevent.spawn(self.cn_app.start)
+        ])
+
+    def create_db_table(self):
+        DataBaseBiz().create_all()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        ip = "127.0.0.1"
+        port = 9201
+    else:
+        ip = sys.argv[1]
+        port = int(sys.argv[2])
+    DataBaseBiz().create_all()
+    UpgClient(ip, port).run()
+---FILE ../src/client/__init__.py
+---FOLDER ../src/server
+---FOLDER ../src/server/biz
+---FOLDER ../src/server/biz/prepare
+---FILE ../src/server/biz/prepare/prepare.py
+class PrePareBiz(object):
+    """get high version, client url
+    upload pkg -> !!prepare!! -> dispatch
+
+
+    """
+    def f(self):
+        pass
+---FILE ../src/server/biz/prepare/__init__.py
+---FILE ../src/server/biz/__init__.py
+---FOLDER ../src/server/cmd_app
+---FOLDER ../src/server/cmd_app/cmd_handle
+---FILE ../src/server/cmd_app/cmd_handle/ping_handle.py
+import requests
+
+from base.util.base_handle import BaseHandle
+from server.send.sender import Sender
+
+
+class PingHandle(BaseHandle):
+    URL = "/"
+
+    @classmethod
+    def get(cls, request):
+        if not request.body:
+            return {"server cmd_app": "ping success"}
+
+        ret = requests.get(request.json["url"]).json()
+        return {"url": request.json["url"], "ret": ret}
+
+    @classmethod
+    def post(cls, request):
+        ret = Sender()._get("cli", "")
+        return {"ret": ret}
+---FILE ../src/server/cmd_app/cmd_handle/prepare_handle.py
+import requests
+
+from base.util.base_handle import BaseHandle
+
+
+class PrepareHandle(BaseHandle):
+    """get high version, client url
+    upload pkg -> !!prepare!! -> dispatch
+    """
+    URL = "/prepare"
+
+    @classmethod
+    def get(cls, request):
+        if not request.body:
+            return {"server cmd_app": "ping success"}
+
+        ret = requests.get(request.json["url"]).json()
+        return {"url": request.json["url"], "ret": ret}
+
+    @classmethod
+    def post(cls, request):
+        ret = requests.get(request.json["url"]).json()
+        return {"url": request.json["url"], "ret": ret}
+---FILE ../src/server/cmd_app/cmd_handle/__init__.py
+---FILE ../src/server/cmd_app/__init__.py
+# command and query from north
+---FOLDER ../src/server/const
+---FILE ../src/server/const/path.py
+from os.path import abspath, join
+
+
+class ROOT(object):
+    UPG_SERVER_DATA = abspath(join(__file__, "../../../../env/svr"))
+
+
+HOST_LIST_JSON = join(ROOT.UPG_SERVER_DATA, "host_list.json")
+DB_PATH = join(ROOT.UPG_SERVER_DATA, "gauss.db")
+---FILE ../src/server/const/__init__.py
+---FOLDER ../src/server/dao
+---FOLDER ../src/server/dao/db
+---FILE ../src/server/dao/db/table.py
+from functools import lru_cache
+
+import sqlalchemy
+from sqlalchemy.orm import sessionmaker
+
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
+
+from sqlalchemy import Column, Integer, String, ForeignKey
+
+from base.util.upg_log import log
+from server.const.path import DB_PATH
+
+Base = declarative_base()
+
+
+class Package(Base):
+    __tablename__ = "package"
+    name = Column(String(32), primary_key=True)
+    high = Column(String(64))
+    low = Column(String(64))
+
+    services = relationship("Service", back_populates="package")
+
+    def __repr__(self):
+        return "Package(%s)" % self.name
+
+
+class Service(Base):
+    __tablename__ = "service"
+    name = Column(String(32), primary_key=True)
+    pkg = Column(String(32), ForeignKey('package.name'))
+
+    package = relationship("Package", back_populates="services")
+    templates = relationship("Template", back_populates="service")
+
+    def __repr__(self):
+        return "Service(%s)" % self.name
+
+
+class Template(Base):
+    __tablename__ = "template"
+    name = Column(String(32), primary_key=True)
+
+    svc = Column(String(32), ForeignKey('service.name'))
+    service = relationship("Service", back_populates="templates")
+
+    def __repr__(self):
+        return "Template(%s)" % self.name
+
+
+class HostUrl(Base):
+    __tablename__ = "hosturl"
+    hid = Column(String(64), primary_key=True)
+    ip = Column(Integer)
+    port = Column(Integer)
+
+
+@lru_cache(maxsize=None)
+class DataBaseBiz(object):
+    """to object"""
+    _engine = None
+    _session = None
+
+    _singleton = None
+    _DB_PATH = DB_PATH
+
+    def __init__(self):
+        self._engine = sqlalchemy.create_engine('sqlite:///%s' % self._DB_PATH)
+        self._session = sessionmaker(bind=self._engine)()
+
+    def create_all(self):
+        Base.metadata.create_all(self._engine, checkfirst=True)
+        log.debug("gauss_db create_all table: %s" % (Base.__subclasses__()))
+
+    def _clear_all(self):
+        for table in (Package, Service, Template):
+            self._session.query(table).delete()
+        self._session.commit()
+        log.debug("gauss_db _clear_all table: %s" % (Base.__subclasses__()))
+
+    def add(self, objs):
+        for obj in objs:
+            self._session.add(obj)
+        self._session.commit()
+
+    @property
+    def session(self):
+        return self._session
+---FILE ../src/server/dao/db/__init__.py
+---FOLDER ../src/server/dao/local
+---FILE ../src/server/dao/local/local.py
+class LocalInfo(object):
+    def all_url(self):
+        # todo register before upgrade
+        return {
+            "127.0.0.1:9201",
+            "127.0.0.1:9211"
+        }---FILE ../src/server/dao/local/__init__.py
+---FILE ../src/server/dao/__init__.py
+---FOLDER ../src/server/report_app
+---FOLDER ../src/server/report_app/report_handle
+---FILE ../src/server/report_app/report_handle/ping_handle.py
+from base.util.base_handle import BaseHandle
+
+import requests
+
+class PingHandle(BaseHandle):
+    URL = "/"
+
+    @classmethod
+    def get(cls, request):
+        if not request.body:
+            return {"server report_app": "ping success"}
+
+        ret = requests.get(request.body["url"])
+        return {"url": request.body["url"], "ret": ret}
+---FILE ../src/server/report_app/report_handle/__init__.py
+---FILE ../src/server/report_app/__init__.py
+# south report
+---FOLDER ../src/server/send
+---FOLDER ../src/server/send/req
+---FILE ../src/server/send/req/collect.py
+---FILE ../src/server/send/req/__init__.py
+---FILE ../src/server/send/sender.py
+import requests
+
+from base.util.file_opt import load_json_file
+from server.const.path import HOST_LIST_JSON
+
+
+class Sender(object):
+    # ret = requests.get("http://%s" % request.json["url"]).json()
+    host2ip_port = {}
+
+    def initialize(self):
+        self.host2ip_port = load_json_file(HOST_LIST_JSON)
+
+    def _get(self, host, url, json_data=None):
+        # ip, port = self.host2ip_port[host]
+        self.initialize()
+        ip, port = self.host2ip_port["ctl1"]
+        # ip, port = "127.0.0.1", 9201
+        full_url = "http://%s:%s/%s" % (ip, port, url)
+        print(full_url)
+        if json_data is None:
+            # print(33)
+            # print(requests.get("http://127.0.0.1:9201/",
+            #                    params=json_data).json())
+            # print(44)
+            # ret = requests.get(full_url)
+            # print(ret)
+            # ret = ret.json()
+            ret = requests.get(full_url).json()
+        else:
+            ret = requests.get(full_url, params=json_data).json()
+        return ret
+---FILE ../src/server/send/__init__.py
+---FILE ../src/server/upg_server.py
+import gevent
+from gevent import monkey
+
+monkey.patch_all()
+
+from os.path import abspath, join
+import sys
+
+sys.path.append(abspath(join(__file__, "../../../env")))
+sys.path.append(abspath(join(__file__, "../../../src")))
+
+from base.util.base_handle import UpgCliApp
+from server.cmd_app import cmd_handle
+from server.report_app import report_handle
+
+
+class UpgServer(object):
+    def __init__(self, ip, north_port, south_port):
+        self.ip = ip
+        self.north_port = north_port
+        self.south_port = south_port
+
+        self.cmd_app = UpgCliApp(self.ip, self.north_port, cmd_handle)
+        self.report_app = UpgCliApp(self.ip, self.south_port, report_handle)
+
+    def run(self):
+        gevent.joinall([
+            gevent.spawn(self.run_cmd_app),
+            gevent.spawn(self.run_report_app),
+        ])
+
+    def run_cmd_app(self):
+        self.cmd_app.start()
+
+    def run_report_app(self):
+        self.report_app.start()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        ip, north_port, south_port = "127.0.0.1", 9101, 9102
+    else:
+        ip = sys.argv[1]
+        north_port, south_port = int(sys.argv[2]), int(sys.argv[3])
+    UpgServer(ip, north_port, south_port).run()
+---FILE ../src/server/__init__.py
+---FILE ../src/__init__.py
