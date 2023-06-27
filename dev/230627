@@ -115,28 +115,13 @@ class Arrange(object):
                 )
         return task4
 
-    def arrange_up_rpm(self, ists, tpl2batch):
+    def arrange_up_rpm(self, host2tpls):
         # close by batch number in descending order
-        MAX_BATCH = 10
-        batch2host2ists = {i: {} for i in range(MAX_BATCH)}
-
-        for ist in ists:
-            batch2host2ists[tpl2batch[ist.tpl.name]]. \
-                setdefault(ist.host, []).append(ist)
-
-        task4 = []
-        for i in range(MAX_BATCH):
-            if batch2host2ists[i]:
-                # can ists shutdown be parallel?
-                task4.append(
-                    [
-                        [
-                            [TaskFactory.create_stop_task(host, ist.tpl)]
-                            for ist in ists
-                        ]
-                        for host, ists in batch2host2ists[i]
-                    ]
-                )
+        task4 = [[
+                [[TaskFactory.create_up_rpm_task(host, tpl)
+                  for tpl in tpls]]
+                for host, tpls in host2tpls.items()
+            ]]
         return task4
 
 
