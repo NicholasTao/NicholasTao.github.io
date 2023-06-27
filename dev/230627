@@ -1,0 +1,154 @@
+server:
+    const:
+        path:
+        config:
+    util:
+        function:
+    dao:
+        db:
+        zk:
+        nova:
+        cps:
+        shell:
+    biz:
+    arrange:
+    schedule: 任务读取, 进度存取, 任务发布, 
+        schedule: 验收
+    app:
+        north: 给server的指令
+            north_app:
+            north_server:
+        accept: client上报的消息
+            accept_app:
+        task:
+            task_app:
+        sender: 向client或server发送
+
+client:
+    const:
+        path:
+        config:
+    util:
+    dao:
+        db:
+        shell:
+    biz:
+        info_collect
+        dispatch
+        stop
+        up_rpm
+        start
+        reboot
+    app:
+        south_server
+        task_app
+
+> 多app server
+> schedule核心
+> task只在数据库内是数字, 出数据库就变成str
+
+=========================
+
+class Task(object):
+    host = ""
+    target = ""
+    action = ""
+
+    def __init__(self, host, target, action):
+        self.host = host
+        self.target = target
+        self.action = action
+
+
+from enum import Enum, unique
+
+
+@unique
+class Status(Enum):
+    Undo = 0
+    Doing = 1
+    Done = 2
+    Fail = 3
+
+
+class TaskFactory(object):
+    @staticmethod
+    def create_dispatch_task(host):
+        return Task(host, None, "dispatch")
+
+    @staticmethod
+    def create_stop_task(host, template):
+        return Task(host, template, "stop")
+
+
+class Arrange(object):
+    host2tpl = {}
+
+    def arrange_dispatch(self, hosts):
+        return [
+            [[[TaskFactory.create_dispatch_task(host)]]]
+            for host in hosts
+        ]
+
+    def arrange_stop(self, ists, tpl2batch):
+        # close by batch number in descending order
+        # chatgpt remove MAX_BATCH
+        MAX_BATCH = 10
+        batch2host2ists = {i: {} for i in range(MAX_BATCH)}
+
+        for ist in ists:
+            batch2host2ists[tpl2batch[ist.tpl.name]]. \
+                setdefault(ist.host, []).append(ist)
+
+        task4 = []
+        for i in range(MAX_BATCH):
+            if batch2host2ists[i]:
+                # can ists shutdown be parallel?
+                task4.append(
+                    [
+                        [
+                            [TaskFactory.create_stop_task(host, ist.tpl)]
+                            for ist in ists
+                        ]
+                        for host, ists in batch2host2ists[i]
+                    ]
+                )
+        return task4
+
+    def arrange_up_rpm(self, ists, tpl2batch):
+        # close by batch number in descending order
+        MAX_BATCH = 10
+        batch2host2ists = {i: {} for i in range(MAX_BATCH)}
+
+        for ist in ists:
+            batch2host2ists[tpl2batch[ist.tpl.name]]. \
+                setdefault(ist.host, []).append(ist)
+
+        task4 = []
+        for i in range(MAX_BATCH):
+            if batch2host2ists[i]:
+                # can ists shutdown be parallel?
+                task4.append(
+                    [
+                        [
+                            [TaskFactory.create_stop_task(host, ist.tpl)]
+                            for ist in ists
+                        ]
+                        for host, ists in batch2host2ists[i]
+                    ]
+                )
+        return task4
+
+
+from enum import Enum, unique
+
+
+@unique
+class Status(Enum):
+    Undo = 0
+    Doing = 1
+    Done = 2
+    Fail = 3
+
+
+print(Status.Done)
