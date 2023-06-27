@@ -1,54 +1,3 @@
-server:
-    const:
-        path:
-        config:
-    util:
-        function:
-    dao:
-        db:
-        zk:
-        nova:
-        cps:
-        shell:
-    biz:
-    arrange:
-    schedule: 任务读取, 进度存取, 任务发布, 
-        schedule: 验收
-    app:
-        north: 给server的指令
-            north_app:
-            north_server:
-        accept: client上报的消息
-            accept_app:
-        task:
-            task_app:
-        sender: 向client或server发送
-
-client:
-    const:
-        path:
-        config:
-    util:
-    dao:
-        db:
-        shell:
-    biz:
-        info_collect
-        dispatch
-        stop
-        up_rpm
-        start
-        reboot
-    app:
-        south_server
-        task_app
-
-> 多app server
-> schedule核心
-> task只在数据库内是数字, 出数据库就变成str
-
-=========================
-
 class Task(object):
     host = ""
     target = ""
@@ -79,6 +28,10 @@ class TaskFactory(object):
     @staticmethod
     def create_stop_task(host, template):
         return Task(host, template, "stop")
+
+    @staticmethod
+    def create_start_task(host, template):
+        return Task(host, template, "start")
 
 
 class Arrange(object):
@@ -118,10 +71,35 @@ class Arrange(object):
     def arrange_up_rpm(self, host2tpls):
         # close by batch number in descending order
         task4 = [[
-                [[TaskFactory.create_up_rpm_task(host, tpl)
-                  for tpl in tpls]]
-                for host, tpls in host2tpls.items()
-            ]]
+            [[TaskFactory.create_up_rpm_task(host, tpl)
+              for tpl in tpls]]
+            for host, tpls in host2tpls.items()
+        ]]
+        return task4
+
+    def arrange_start(self, ists, tpl2batch):
+        # close by batch number in increasing order
+        # chatgpt remove MAX_BATCH
+        MAX_BATCH = 10
+        batch2host2ists = {i: {} for i in range(MAX_BATCH)}
+
+        for ist in ists:
+            batch2host2ists[tpl2batch[ist.tpl.name]]. \
+                setdefault(ist.host, []).append(ist)
+
+        task4 = []
+        for i in range(MAX_BATCH - 1, 0, -1):
+            if batch2host2ists[i]:
+                # can ists shutdown be parallel?
+                task4.append(
+                    [
+                        [
+                            [TaskFactory.create_start_task(host, ist.tpl)]
+                            for ist in ists
+                        ]
+                        for host, ists in batch2host2ists[i]
+                    ]
+                )
         return task4
 
 
